@@ -441,24 +441,6 @@
   .bob-2 { animation: bob2 4.2s ease-in-out infinite; animation-delay: -1s; }
   .bob-3 { animation: bob3 6s ease-in-out infinite; animation-delay: -2s; }
 
-  /* MARQUEE */
-  .marquee-wrap {
-    overflow: hidden;
-    padding: 1rem 0;
-    background: var(--ink);
-    color: var(--cream);
-  }
-  .marquee {
-    display: flex; gap: 3rem; white-space: nowrap;
-    font-family: 'Inter', sans-serif;
-    font-weight: 900;
-    font-size: 0.95rem;
-    letter-spacing: -0.01em;
-    text-transform: uppercase;
-  }
-  .marquee-item { display: flex; align-items: center; gap: 3rem; }
-  .marquee-item::after { content: "◆"; color: var(--accent); }
-
   /* WAR ROOM */
   .warroom { padding: 3rem 0 6rem; display: none; }
 
@@ -984,22 +966,6 @@
     </div>
   </section>
 
-  <!-- MARQUEE -->
-  <div class="marquee-wrap">
-    <div class="marquee" id="marquee">
-      <div class="marquee-item">5 SIGNAL SOURCES</div>
-      <div class="marquee-item">90-DAY FORECAST</div>
-      <div class="marquee-item">THREAT ANALYSIS</div>
-      <div class="marquee-item">COUNTER-STRATEGY</div>
-      <div class="marquee-item">LIVE INTELLIGENCE</div>
-      <div class="marquee-item">5 SIGNAL SOURCES</div>
-      <div class="marquee-item">90-DAY FORECAST</div>
-      <div class="marquee-item">THREAT ANALYSIS</div>
-      <div class="marquee-item">COUNTER-STRATEGY</div>
-      <div class="marquee-item">LIVE INTELLIGENCE</div>
-    </div>
-  </div>
-
   <!-- WAR ROOM -->
   <section id="warroom" class="warroom">
     <div class="container">
@@ -1114,6 +1080,16 @@
 
 <script>
 // ============================================================
+// SCROLL TO TOP ON LOAD (fixes "stuck in down section" bug)
+// ============================================================
+if ('scrollRestoration' in history) {
+  history.scrollRestoration = 'manual';
+}
+window.addEventListener('load', () => {
+  window.scrollTo({ top: 0, behavior: 'instant' });
+});
+
+// ============================================================
 // PARALLAX
 // ============================================================
 (function initParallax() {
@@ -1156,7 +1132,11 @@
     hasFadedOut = true;
     anime({
       targets: introEl, opacity: [1, 0], duration: 700, easing: 'easeInOutQuad',
-      complete: () => { introEl.style.display = 'none'; runPageIntro(); }
+      complete: () => {
+        introEl.style.display = 'none';
+        window.scrollTo({ top: 0, behavior: 'instant' });
+        runPageIntro();
+      }
     });
   }
   setTimeout(fadeOutIntro, 3500);
@@ -1220,10 +1200,6 @@ function runPageIntro() {
       delay: 1100,
       ease: 'easeOutExpo'
     });
-  } catch (e) { console.error(e); }
-
-  try {
-    anime({ targets: '#marquee', translateX: ['0%', '-50%'], duration: 30000, loop: true, ease: 'linear' });
   } catch (e) { console.error(e); }
 
   window.animateSignalCards = function() {
@@ -1316,7 +1292,6 @@ document.getElementById('analyze-btn').addEventListener('click', () => {
     targets: '#hero', opacity: [1, 0], translateY: [0, -40], duration: 500, easing: 'easeInQuad',
     complete: () => {
       document.getElementById('hero').style.display = 'none';
-      document.querySelector('.marquee-wrap').style.display = 'none';
       const warroom = document.getElementById('warroom');
       warroom.style.display = 'block';
       buildSignalGrid();
@@ -1364,7 +1339,7 @@ function renderRichText(el, text) {
 function typewriter(el, text) { renderRichText(el, text); }
 
 // ============================================================
-// STREAM FROM BACKEND (LIVE RENDER URL)
+// STREAM FROM BACKEND
 // ============================================================
 async function runAnalysis(company, description) {
   setStatus('Waking up the intelligence engine (Render cold start ~30s)...');
@@ -1449,6 +1424,7 @@ function handleEvent(event) {
       }, 300);
       break;
     case 'complete': setStatus('Intelligence Complete'); stopTimer(); break;
+    case 'error': setStatus('Error: ' + data.message); stopTimer(); break;
   }
 }
 
