@@ -137,3 +137,6 @@ MIT — Free to use, modify, and distribute.
 ---
 
 **Built for HackIndia AgentVerse 2026.**
+
+
+live link for the project - (https://oracle-competitive-intelligence.vercel.app/)
