@@ -111,9 +111,7 @@
     100% { box-shadow: 0 0 0 0 rgba(11, 143, 62, 0); }
   }
 
-  /* ============================================
-     HERO — COMPACT, FITS ONE VIEWPORT
-     ============================================ */
+  /* HERO */
   .hero {
     padding: 2rem 0 3rem;
     position: relative;
@@ -135,7 +133,6 @@
     align-items: center;
   }
 
-  /* HEADLINE */
   .hero-headline {
     text-align: center;
     position: relative;
@@ -164,12 +161,6 @@
     justify-content: center;
     gap: 0.25em;
     flex-wrap: wrap;
-  }
-  .hero-line-3 {
-    font-size: clamp(3rem, 8vw, 6.5rem);
-    color: var(--accent);
-    font-style: italic;
-    display: block;
   }
 
   .hero-inline-badge {
@@ -208,9 +199,7 @@
     opacity: 0;
   }
 
-  /* ============================================
-     INLINE FORM — ONE ROW
-     ============================================ */
+  /* INLINE FORM */
   .form-inline {
     margin-top: 2rem;
     width: 100%;
@@ -291,9 +280,7 @@
     .submit-btn { padding: 1rem 1.5rem; }
   }
 
-  /* ============================================
-     FLOATING ELEMENTS (Payway style)
-     ============================================ */
+  /* FLOATING ELEMENTS */
   .float-el {
     position: absolute;
     z-index: 2;
@@ -308,9 +295,7 @@
     display: flex;
     align-items: center;
     gap: 0.6rem;
-    box-shadow:
-      0 16px 32px rgba(0,0,0,0.08),
-      0 4px 12px rgba(0,0,0,0.05);
+    box-shadow: 0 16px 32px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.05);
     border: 1px solid rgba(0,0,0,0.04);
   }
   .float-card .fc-icon {
@@ -427,7 +412,6 @@
   .float-dot.green  { background: linear-gradient(135deg, #4ADE80, #16A34A); }
   .float-dot.purple { background: linear-gradient(135deg, #C084FC, #7C3AED); }
 
-  /* Positions — kept AWAY from the center so they don't collide with content */
   .pos-signal  { top: 4%; left: 2%; }
   .pos-patent  { top: 6%; right: 4%; }
   .pos-hiring  { top: 38%; left: 1%; }
@@ -457,9 +441,7 @@
   .bob-2 { animation: bob2 4.2s ease-in-out infinite; animation-delay: -1s; }
   .bob-3 { animation: bob3 6s ease-in-out infinite; animation-delay: -2s; }
 
-  /* ============================================
-     MARQUEE
-     ============================================ */
+  /* MARQUEE */
   .marquee-wrap {
     overflow: hidden;
     padding: 1rem 0;
@@ -477,9 +459,7 @@
   .marquee-item { display: flex; align-items: center; gap: 3rem; }
   .marquee-item::after { content: "◆"; color: var(--accent); }
 
-  /* ============================================
-     WAR ROOM
-     ============================================ */
+  /* WAR ROOM */
   .warroom { padding: 3rem 0 6rem; display: none; }
 
   .status-bar {
@@ -1384,13 +1364,13 @@ function renderRichText(el, text) {
 function typewriter(el, text) { renderRichText(el, text); }
 
 // ============================================================
-// STREAM FROM BACKEND
+// STREAM FROM BACKEND (LIVE RENDER URL)
 // ============================================================
 async function runAnalysis(company, description) {
-  setStatus('Initializing intelligence scan...');
+  setStatus('Waking up the intelligence engine (Render cold start ~30s)...');
   startTimer();
   try {
-    const response = await fetch('http://localhost:8001/api/analyze', {
+    const response = await fetch('https://oracle-competitive-intelligence.onrender.com/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ company, description })
@@ -1415,7 +1395,7 @@ async function runAnalysis(company, description) {
     stopTimer();
     setStatus('Intelligence Complete');
   } catch (err) {
-    setStatus('Error: ' + err.message);
+    setStatus('Error: ' + err.message + ' — retry in 30s');
     stopTimer();
   }
 }
