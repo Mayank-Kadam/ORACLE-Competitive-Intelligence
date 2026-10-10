@@ -1,9 +1,10 @@
 # ==========================================================
-# ORACLE BACKEND — Predictive Competitive Intelligence (v4)
-# Fixed: jobs/shopping parsing + robust verdict detection
+# ORACLE BACKEND — Predictive Competitive Intelligence (v5)
+# Fixed: shorter queries, retry logic, quota detection, logging
 # ==========================================================
 import os
 import json
+import time
 import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -30,80 +31,107 @@ class AnalyzeRequest(BaseModel):
     company: str
     description: str
 
-# ==== SERPAPI WITH ROBUST PARSING ====
-def serpapi_call(query, engine):
-    """Returns list of dicts with title, link, snippet, thumbnail, source."""
+# ==== SERPAPI WITH RETRY + QUOTA DETECTION ====
+def serpapi_call(query, engine, retries=2):
+    """Returns list of dicts. Retries once on failure. Detects quota issues."""
     url = "https://serpapi.com/search"
     params = {"q": query, "api_key": SERPAPI_API_KEY, "engine": engine}
 
-    # Location helps jobs and shopping return real results
-    if engine in ["google_jobs", "google_shopping"]:
-        params["location"] = "United States"
+    for attempt in range(retries):
+        try:
+            response = requests.get(url, params=params, timeout=20)
+            results = response.json()
 
-    try:
-        response = requests.get(url, params=params, timeout=20)
-        results = response.json()
+            # --- Detect quota exhaustion ---
+            if "error" in results:
+                err_msg = str(results["error"])
+                print(f"[SERPAPI {engine}] Attempt {attempt+1} ERROR: {err_msg}")
 
-        # Try each result key in order
-        search_items = (
-            results.get("organic_results") or
-            results.get("news_results") or
-            results.get("jobs_results") or
-            results.get("shopping_results") or
-            []
-        )
+                if any(kw in err_msg.lower() for kw in ["exhausted", "quota", "limit", "plan"]):
+                    return [{
+                        "title": "⚠️ SerpApi quota exhausted",
+                        "snippet": "Free tier allows 250 searches/month. Resets on the 1st.",
+                        "link": "https://serpapi.com/dashboard",
+                        "thumbnail": "",
+                        "source": "System"
+                    }]
 
-        items = []
-        for r in search_items[:3]:
-            # --- Link extraction ---
-            link = r.get("link", "")
-            if not link and isinstance(r.get("source"), dict):
-                link = r["source"].get("link", "")
-            # Jobs: link lives inside apply_options
-            if not link and isinstance(r.get("apply_options"), list) and r["apply_options"]:
-                try:
-                    link = r["apply_options"][0].get("link", "")
-                except Exception:
-                    pass
-            if not link:
-                link = r.get("share_link", "")
+                # Retry other errors
+                if attempt < retries - 1:
+                    time.sleep(1)
+                    continue
+                return [{"title": f"API error: {err_msg}", "snippet": "", "link": "", "thumbnail": "", "source": ""}]
 
-            # --- Snippet extraction ---
-            snippet = r.get("snippet") or r.get("description") or ""
-            if not snippet and r.get("price"):
-                snippet = f"Price: {r['price']}"
-            if not snippet and r.get("extensions"):
-                snippet = " · ".join(r["extensions"][:3])
-            # Strip HTML and truncate
-            snippet = snippet.replace("<b>", "").replace("</b>", "").replace("<br>", " ")
-            snippet = snippet[:250].strip()
+            # --- Parse results ---
+            search_items = (
+                results.get("organic_results") or
+                results.get("news_results") or
+                results.get("jobs_results") or
+                results.get("shopping_results") or
+                []
+            )
+            print(f"[SERPAPI {engine}] Attempt {attempt+1}: query='{query}' → {len(search_items)} items")
 
-            # --- Thumbnail extraction ---
-            thumbnail = r.get("thumbnail", "")
-            if not thumbnail and isinstance(r.get("source"), dict):
-                thumbnail = r["source"].get("logo", "")
+            # Retry if empty on first attempt
+            if not search_items and attempt < retries - 1:
+                time.sleep(1)
+                continue
 
-            # --- Source name extraction ---
-            source_name = ""
-            if isinstance(r.get("source"), dict):
-                source_name = r["source"].get("name", "")
-            elif isinstance(r.get("source"), str):
-                source_name = r["source"]
-            elif r.get("company_name"):
-                source_name = r["company_name"]
-            elif r.get("via"):
-                source_name = r["via"]
+            items = []
+            for r in search_items[:3]:
+                # --- Link extraction ---
+                link = r.get("link", "")
+                if not link and isinstance(r.get("source"), dict):
+                    link = r["source"].get("link", "")
+                if not link and isinstance(r.get("apply_options"), list) and r["apply_options"]:
+                    try:
+                        link = r["apply_options"][0].get("link", "")
+                    except Exception:
+                        pass
+                if not link:
+                    link = r.get("share_link", "")
 
-            items.append({
-                "title": r.get("title", "No title"),
-                "link": link,
-                "snippet": snippet,
-                "thumbnail": thumbnail,
-                "source": source_name,
-            })
-        return items
-    except Exception as e:
-        return [{"title": "Search error", "snippet": str(e), "link": "", "thumbnail": "", "source": ""}]
+                # --- Snippet extraction ---
+                snippet = r.get("snippet") or r.get("description") or ""
+                if not snippet and r.get("price"):
+                    snippet = f"Price: {r['price']}"
+                if not snippet and r.get("extensions"):
+                    snippet = " · ".join(r["extensions"][:3])
+                snippet = str(snippet).replace("<b>", "").replace("</b>", "").replace("<br>", " ")
+                snippet = snippet[:250].strip()
+
+                # --- Thumbnail extraction ---
+                thumbnail = r.get("thumbnail", "")
+                if not thumbnail and isinstance(r.get("source"), dict):
+                    thumbnail = r["source"].get("logo", "")
+
+                # --- Source name extraction ---
+                source_name = ""
+                if isinstance(r.get("source"), dict):
+                    source_name = r["source"].get("name", "")
+                elif isinstance(r.get("source"), str):
+                    source_name = r["source"]
+                elif r.get("company_name"):
+                    source_name = r["company_name"]
+                elif r.get("via"):
+                    source_name = r["via"]
+
+                items.append({
+                    "title": r.get("title", "No title"),
+                    "link": link,
+                    "snippet": snippet,
+                    "thumbnail": thumbnail,
+                    "source": source_name,
+                })
+            return items
+
+        except Exception as e:
+            print(f"[SERPAPI {engine}] Attempt {attempt+1} EXCEPTION: {str(e)}")
+            if attempt == retries - 1:
+                return [{"title": f"Search failed after {retries} attempts", "snippet": str(e), "link": "", "thumbnail": "", "source": ""}]
+            time.sleep(1)
+
+    return [{"title": "No results", "snippet": "Empty response", "link": "", "thumbnail": "", "source": ""}]
 
 
 def format_for_llm(items, index_offset=0):
@@ -126,12 +154,29 @@ def event_stream(company, description):
 
     yield emit("start", {"company": company, "description": description})
 
+    # ---- Pre-check: verify SerpApi quota isn't exhausted ----
+    try:
+        acct = requests.get(
+            "https://serpapi.com/account",
+            params={"api_key": SERPAPI_API_KEY},
+            timeout=10
+        ).json()
+        left = acct.get("total_searches_left", None)
+        print(f"[SERPAPI] Account status: {left} searches left this month")
+        if left is not None and left <= 0:
+            yield emit("error", {"message": "SerpApi quota exhausted for this month. Please try again after the 1st."})
+            yield emit("complete", {})
+            return
+    except Exception as e:
+        print(f"[SERPAPI] Pre-check failed: {e}")
+
+    # ---- 5 signal scans (shorter, reliable queries) ----
     signals = [
-        ("hiring",   "google_jobs",     f"{company} engineer",                               "Hiring"),
-        ("patents",  "google_scholar",  f"{company} patents research innovation",            "Patents"),
-        ("pricing",  "google_shopping", f"{company} product",                                "Pricing"),
-        ("news",     "google_news",     f"{company} strategy announcement",                  "News"),
-        ("position", "google",          f"{company} market expansion partnership strategy",  "Position"),
+        ("hiring",   "google_jobs",     f"{company} engineer",              "Hiring"),
+        ("patents",  "google_scholar",  f"{company} patents research",      "Patents"),
+        ("pricing",  "google_shopping", f"{company} product",               "Pricing"),
+        ("news",     "google_news",     f"{company} strategy",              "News"),
+        ("position", "google_news",     f"{company} partnership expansion", "Position"),
     ]
 
     all_sources = []
@@ -151,6 +196,7 @@ def event_stream(company, description):
             item_with_idx["category"] = label
             all_sources.append(item_with_idx)
         yield emit("signal_complete", {"signal": key, "count": len(items), "sources": items})
+        time.sleep(0.3)  # Small delay between calls to avoid rate limiting
 
     yield emit("sources_collected", {"sources": all_sources})
 
@@ -169,7 +215,7 @@ def event_stream(company, description):
         f"| Pricing | N/10 | one-line finding | [3] |\n"
         f"| News | N/10 | one-line finding | [4] |\n"
         f"| Position | N/10 | one-line finding | [5] |\n\n"
-        f"Replace N with the actual strength number (1-10). "
+        f"Replace N with the actual strength number (1-10).\n\n"
         f"## Detailed Findings\n\n"
         f"### Hiring — Strength: N/10\n"
         f"- **What we found:** one plain-English sentence\n"
@@ -246,7 +292,7 @@ def event_stream(company, description):
     forecast_prompt = (
         f"You are the Chief Strategy Officer. Based on this intelligence on {company}:\n\n"
         f"THREAT:\n{threat}\n\nOPPORTUNITY:\n{opportunity}\n\n"
-        f"First line: EXACTLY ONE WORD — ALERT, MONITOR, STABLE, or OPPORTUNITY. Do not use any markdown on the first line.\n"
+        f"First line: EXACTLY ONE WORD — ALERT, MONITOR, STABLE, or OPPORTUNITY. No markdown on the first line.\n"
         f"Then a blank line. Then EXACTLY this structure:\n\n"
         f"## 90-Day Prediction\n"
         f"- **Most likely move:** <one sentence with confidence %>\n"
@@ -262,7 +308,7 @@ def event_stream(company, description):
     )
     forecast_raw = creative_llm.invoke([HumanMessage(content=forecast_prompt)]).content
 
-    # ---- Robust decision parsing (strip markdown) ----
+    # ---- Robust decision parsing ----
     forecast_lines = forecast_raw.strip().split('\n')
     first_line_clean = forecast_lines[0].replace("*", "").replace("#", "").strip().upper()
 
@@ -271,14 +317,12 @@ def event_stream(company, description):
     elif "MONITOR" in first_line_clean: decision = "MONITOR"
     elif "STABLE" in first_line_clean: decision = "STABLE"
     else:
-        # Fallback: search entire response
         fu = forecast_raw.upper()
         if "OPPORTUNITY" in fu: decision = "OPPORTUNITY"
         elif "ALERT" in fu: decision = "ALERT"
         elif "MONITOR" in fu: decision = "MONITOR"
         else: decision = "STABLE"
 
-    # Clean forecast body — strip the first line if it was the verdict
     if first_line_clean in ["ALERT", "MONITOR", "STABLE", "OPPORTUNITY"]:
         forecast = '\n'.join(forecast_lines[1:]).strip()
     else:
@@ -295,4 +339,4 @@ async def analyze(request: AnalyzeRequest):
 
 @app.get("/")
 async def root():
-    return {"status": "Oracle API is running", "version": "4.0"}
+    return {"status": "Oracle API is running", "version": "5.0"}
