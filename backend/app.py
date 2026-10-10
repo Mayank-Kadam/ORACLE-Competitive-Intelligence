@@ -1,6 +1,6 @@
 # ==========================================================
-# ORACLE BACKEND — Predictive Competitive Intelligence (v3)
-# Structured markdown output + source links + thumbnails
+# ORACLE BACKEND — Predictive Competitive Intelligence (v4)
+# Fixed: jobs/shopping parsing + robust verdict detection
 # ==========================================================
 import os
 import json
@@ -30,14 +30,21 @@ class AnalyzeRequest(BaseModel):
     company: str
     description: str
 
-# ==== SERPAPI WITH STRUCTURED RESULTS ====
+# ==== SERPAPI WITH ROBUST PARSING ====
 def serpapi_call(query, engine):
-    """Returns list of dicts with title, link, snippet, thumbnail."""
+    """Returns list of dicts with title, link, snippet, thumbnail, source."""
     url = "https://serpapi.com/search"
     params = {"q": query, "api_key": SERPAPI_API_KEY, "engine": engine}
+
+    # Location helps jobs and shopping return real results
+    if engine in ["google_jobs", "google_shopping"]:
+        params["location"] = "United States"
+
     try:
         response = requests.get(url, params=params, timeout=20)
         results = response.json()
+
+        # Try each result key in order
         search_items = (
             results.get("organic_results") or
             results.get("news_results") or
@@ -45,29 +52,59 @@ def serpapi_call(query, engine):
             results.get("shopping_results") or
             []
         )
+
         items = []
         for r in search_items[:3]:
+            # --- Link extraction ---
             link = r.get("link", "")
             if not link and isinstance(r.get("source"), dict):
                 link = r["source"].get("link", "")
+            # Jobs: link lives inside apply_options
+            if not link and isinstance(r.get("apply_options"), list) and r["apply_options"]:
+                try:
+                    link = r["apply_options"][0].get("link", "")
+                except Exception:
+                    pass
+            if not link:
+                link = r.get("share_link", "")
+
+            # --- Snippet extraction ---
+            snippet = r.get("snippet") or r.get("description") or ""
+            if not snippet and r.get("price"):
+                snippet = f"Price: {r['price']}"
+            if not snippet and r.get("extensions"):
+                snippet = " · ".join(r["extensions"][:3])
+            # Strip HTML and truncate
+            snippet = snippet.replace("<b>", "").replace("</b>", "").replace("<br>", " ")
+            snippet = snippet[:250].strip()
+
+            # --- Thumbnail extraction ---
             thumbnail = r.get("thumbnail", "")
             if not thumbnail and isinstance(r.get("source"), dict):
                 thumbnail = r["source"].get("logo", "")
+
+            # --- Source name extraction ---
             source_name = ""
             if isinstance(r.get("source"), dict):
                 source_name = r["source"].get("name", "")
             elif isinstance(r.get("source"), str):
                 source_name = r["source"]
+            elif r.get("company_name"):
+                source_name = r["company_name"]
+            elif r.get("via"):
+                source_name = r["via"]
+
             items.append({
                 "title": r.get("title", "No title"),
                 "link": link,
-                "snippet": r.get("snippet", r.get("description", "")),
+                "snippet": snippet,
                 "thumbnail": thumbnail,
                 "source": source_name,
             })
         return items
     except Exception as e:
         return [{"title": "Search error", "snippet": str(e), "link": "", "thumbnail": "", "source": ""}]
+
 
 def format_for_llm(items, index_offset=0):
     output = ""
@@ -76,8 +113,11 @@ def format_for_llm(items, index_offset=0):
         output += f"[{idx}] {item['title']}\n"
         if item.get('source'):
             output += f"    Source: {item['source']}\n"
-        output += f"    Snippet: {item['snippet']}\n\n"
+        if item.get('snippet'):
+            output += f"    Snippet: {item['snippet']}\n"
+        output += "\n"
     return output if output else "No results found."
+
 
 # ==== EVENT STREAM ====
 def event_stream(company, description):
@@ -87,10 +127,10 @@ def event_stream(company, description):
     yield emit("start", {"company": company, "description": description})
 
     signals = [
-        ("hiring",   "google_jobs",     f"{company} hiring engineering AI machine learning",  "Hiring"),
-        ("patents",  "google_scholar",  f"{company} patents research paper innovation",       "Patents"),
-        ("pricing",  "google_shopping", f"{company} product price launch new",                "Pricing"),
-        ("news",     "google_news",     f"{company} strategy CEO statement announcement",     "News"),
+        ("hiring",   "google_jobs",     f"{company} engineer",                               "Hiring"),
+        ("patents",  "google_scholar",  f"{company} patents research innovation",            "Patents"),
+        ("pricing",  "google_shopping", f"{company} product",                                "Pricing"),
+        ("news",     "google_news",     f"{company} strategy announcement",                  "News"),
         ("position", "google",          f"{company} market expansion partnership strategy",  "Position"),
     ]
 
@@ -124,32 +164,33 @@ def event_stream(company, description):
         f"## Signal Strength Summary\n\n"
         f"| Category | Strength | Key Finding | Sources |\n"
         f"|----------|----------|-------------|---------|\n"
-        f"| Hiring | X/10 | one-line finding | [1] |\n"
-        f"| Patents | X/10 | one-line finding | [2] |\n"
-        f"| Pricing | X/10 | one-line finding | [3] |\n"
-        f"| News | X/10 | one-line finding | [4] |\n"
-        f"| Position | X/10 | one-line finding | [5] |\n\n"
+        f"| Hiring | N/10 | one-line finding | [1] |\n"
+        f"| Patents | N/10 | one-line finding | [2] |\n"
+        f"| Pricing | N/10 | one-line finding | [3] |\n"
+        f"| News | N/10 | one-line finding | [4] |\n"
+        f"| Position | N/10 | one-line finding | [5] |\n\n"
+        f"Replace N with the actual strength number (1-10). "
         f"## Detailed Findings\n\n"
-        f"### Hiring — Strength: X/10\n"
+        f"### Hiring — Strength: N/10\n"
         f"- **What we found:** one plain-English sentence\n"
         f"- **Why it matters:** one sentence on strategic intent\n"
-        f"- **Sources:** [1], [2]\n\n"
-        f"### Patents — Strength: X/10\n"
+        f"- **Sources:** [1]\n\n"
+        f"### Patents — Strength: N/10\n"
+        f"- **What we found:** one sentence\n"
+        f"- **Why it matters:** one sentence\n"
+        f"- **Sources:** [2]\n\n"
+        f"### Pricing — Strength: N/10\n"
         f"- **What we found:** one sentence\n"
         f"- **Why it matters:** one sentence\n"
         f"- **Sources:** [3]\n\n"
-        f"### Pricing — Strength: X/10\n"
+        f"### News — Strength: N/10\n"
         f"- **What we found:** one sentence\n"
         f"- **Why it matters:** one sentence\n"
         f"- **Sources:** [4]\n\n"
-        f"### News — Strength: X/10\n"
+        f"### Position — Strength: N/10\n"
         f"- **What we found:** one sentence\n"
         f"- **Why it matters:** one sentence\n"
         f"- **Sources:** [5]\n\n"
-        f"### Position — Strength: X/10\n"
-        f"- **What we found:** one sentence\n"
-        f"- **Why it matters:** one sentence\n"
-        f"- **Sources:** [6]\n\n"
         f"RULES:\n"
         f"- Simple language, no jargon.\n"
         f"- One sentence per bullet.\n"
@@ -205,7 +246,7 @@ def event_stream(company, description):
     forecast_prompt = (
         f"You are the Chief Strategy Officer. Based on this intelligence on {company}:\n\n"
         f"THREAT:\n{threat}\n\nOPPORTUNITY:\n{opportunity}\n\n"
-        f"First line: EXACTLY ONE WORD — ALERT, MONITOR, STABLE, or OPPORTUNITY.\n"
+        f"First line: EXACTLY ONE WORD — ALERT, MONITOR, STABLE, or OPPORTUNITY. Do not use any markdown on the first line.\n"
         f"Then a blank line. Then EXACTLY this structure:\n\n"
         f"## 90-Day Prediction\n"
         f"- **Most likely move:** <one sentence with confidence %>\n"
@@ -221,20 +262,24 @@ def event_stream(company, description):
     )
     forecast_raw = creative_llm.invoke([HumanMessage(content=forecast_prompt)]).content
 
-    first_line = forecast_raw.strip().split('\n')[0].strip().upper()
-    if "ALERT" in first_line: decision = "ALERT"
-    elif "OPPORTUNITY" in first_line: decision = "OPPORTUNITY"
-    elif "MONITOR" in first_line: decision = "MONITOR"
-    elif "STABLE" in first_line: decision = "STABLE"
+    # ---- Robust decision parsing (strip markdown) ----
+    forecast_lines = forecast_raw.strip().split('\n')
+    first_line_clean = forecast_lines[0].replace("*", "").replace("#", "").strip().upper()
+
+    if "ALERT" in first_line_clean: decision = "ALERT"
+    elif "OPPORTUNITY" in first_line_clean: decision = "OPPORTUNITY"
+    elif "MONITOR" in first_line_clean: decision = "MONITOR"
+    elif "STABLE" in first_line_clean: decision = "STABLE"
     else:
+        # Fallback: search entire response
         fu = forecast_raw.upper()
-        if "ALERT" in fu: decision = "ALERT"
-        elif "OPPORTUNITY" in fu: decision = "OPPORTUNITY"
+        if "OPPORTUNITY" in fu: decision = "OPPORTUNITY"
+        elif "ALERT" in fu: decision = "ALERT"
         elif "MONITOR" in fu: decision = "MONITOR"
         else: decision = "STABLE"
 
-    forecast_lines = forecast_raw.strip().split('\n')
-    if forecast_lines[0].strip().upper() in ["ALERT", "MONITOR", "STABLE", "OPPORTUNITY"]:
+    # Clean forecast body — strip the first line if it was the verdict
+    if first_line_clean in ["ALERT", "MONITOR", "STABLE", "OPPORTUNITY"]:
         forecast = '\n'.join(forecast_lines[1:]).strip()
     else:
         forecast = forecast_raw
@@ -242,10 +287,12 @@ def event_stream(company, description):
     yield emit("forecast_complete", {"forecast": forecast, "decision": decision})
     yield emit("complete", {})
 
+
 @app.post("/api/analyze")
 async def analyze(request: AnalyzeRequest):
     return StreamingResponse(event_stream(request.company, request.description), media_type="text/event-stream")
 
+
 @app.get("/")
 async def root():
-    return {"status": "Oracle API is running", "version": "3.0"}
+    return {"status": "Oracle API is running", "version": "4.0"}
