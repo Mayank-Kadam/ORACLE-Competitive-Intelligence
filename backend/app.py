@@ -1,6 +1,6 @@
 # ==========================================================
-# ORACLE BACKEND — Predictive Competitive Intelligence (v6)
-# Two-layer verdict: AI reasoning + code-level sanity check
+# ORACLE BACKEND — Predictive Competitive Intelligence (v7)
+# Fix: Location param, better queries, clean error handling
 # ==========================================================
 import os
 import json
@@ -34,26 +34,32 @@ class AnalyzeRequest(BaseModel):
 
 
 # ==========================================================
-# SERPAPI — RETRY + QUOTA DETECTION + ROBUST PARSING
+# SERPAPI — CLEAN RETURN (empty list on failure)
 # ==========================================================
 def serpapi_call(query, engine, retries=2):
-    """Returns list of dicts. Retries on failure. Detects quota issues."""
+    """Returns list of dicts. Returns EMPTY list on failure (not error cards)."""
     url = "https://serpapi.com/search"
     params = {"q": query, "api_key": SERPAPI_API_KEY, "engine": engine}
+
+    # Location param is CRITICAL for jobs and shopping engines
+    if engine in ["google_jobs", "google_shopping"]:
+        params["location"] = "United States"
+        params["gl"] = "us"
+        params["hl"] = "en"
 
     for attempt in range(retries):
         try:
             response = requests.get(url, params=params, timeout=20)
             results = response.json()
 
-            # Quota error detection
+            # Quota exhausted → return system card ONCE
             if "error" in results:
                 err_msg = str(results["error"])
                 print(f"[SERPAPI {engine}] Attempt {attempt+1} ERROR: {err_msg}")
                 if any(kw in err_msg.lower() for kw in ["exhausted", "quota", "limit", "plan"]):
                     return [{
                         "title": "⚠️ SerpApi quota exhausted",
-                        "snippet": "Free tier allows 250 searches/month. Resets on the 1st.",
+                        "snippet": "Free tier resets monthly.",
                         "link": "https://serpapi.com/dashboard",
                         "thumbnail": "",
                         "source": "System"
@@ -61,7 +67,8 @@ def serpapi_call(query, engine, retries=2):
                 if attempt < retries - 1:
                     time.sleep(1)
                     continue
-                return [{"title": f"API error: {err_msg}", "snippet": "", "link": "", "thumbnail": "", "source": ""}]
+                # Silent fail — return empty list
+                return []
 
             search_items = (
                 results.get("organic_results") or
@@ -96,6 +103,13 @@ def serpapi_call(query, engine, retries=2):
                     snippet = f"Price: {r['price']}"
                 if not snippet and r.get("extensions"):
                     snippet = " · ".join(r["extensions"][:3])
+                if not snippet and r.get("detected_extensions"):
+                    ext = r["detected_extensions"]
+                    parts = []
+                    if ext.get("schedule_type"): parts.append(ext["schedule_type"])
+                    if ext.get("salary"): parts.append(ext["salary"])
+                    if ext.get("posted_at"): parts.append(ext["posted_at"])
+                    snippet = " · ".join(parts)
                 snippet = str(snippet).replace("<b>", "").replace("</b>", "").replace("<br>", " ")
                 snippet = snippet[:250].strip()
 
@@ -127,10 +141,10 @@ def serpapi_call(query, engine, retries=2):
         except Exception as e:
             print(f"[SERPAPI {engine}] Attempt {attempt+1} EXCEPTION: {str(e)}")
             if attempt == retries - 1:
-                return [{"title": f"Search failed after {retries} attempts", "snippet": str(e), "link": "", "thumbnail": "", "source": ""}]
+                return []  # Silent fail
             time.sleep(1)
 
-    return [{"title": "No results", "snippet": "Empty response", "link": "", "thumbnail": "", "source": ""}]
+    return []
 
 
 def format_for_llm(items, index_offset=0):
@@ -147,35 +161,20 @@ def format_for_llm(items, index_offset=0):
 
 
 # ==========================================================
-# VERDICT LOGIC — Pure function, easy to test
+# VERDICT LOGIC
 # ==========================================================
 def compute_verdict_from_strengths(strengths):
-    """
-    Given a list of integer strengths (1-10), return the mathematically
-    correct verdict. This overrides any AI hallucination.
-    """
     if not strengths:
         return "MONITOR", 5.0
-
     avg = sum(strengths) / len(strengths)
-
-    # Count strong and weak signals
     strong_count = sum(1 for s in strengths if s >= 7)
-    weak_count = sum(1 for s in strengths if s <= 3)
 
-    # ALERT: Many strong signals OR high average
     if avg >= 6.0 or strong_count >= 3:
         return "ALERT", avg
-
-    # STABLE: Everything is weak
     if avg < 2.5 and strong_count == 0:
         return "STABLE", avg
-
-    # OPPORTUNITY: Competitor is genuinely weak
     if avg < 4.0 and strong_count <= 1:
         return "OPPORTUNITY", avg
-
-    # MONITOR: Everything else (mixed signals)
     return "MONITOR", avg
 
 
@@ -188,7 +187,7 @@ def event_stream(company, description):
 
     yield emit("start", {"company": company, "description": description})
 
-    # ---- Quota pre-check ----
+    # Quota pre-check
     try:
         acct = requests.get(
             "https://serpapi.com/account",
@@ -204,13 +203,13 @@ def event_stream(company, description):
     except Exception as e:
         print(f"[SERPAPI] Pre-check failed: {e}")
 
-    # ---- 5 signal scans ----
+    # ---- Signal scans with engine-optimized queries ----
     signals = [
-        ("hiring",   "google_jobs",     f"{company} engineer",              "Hiring"),
-        ("patents",  "google_scholar",  f"{company} patents research",      "Patents"),
-        ("pricing",  "google_shopping", f"{company} product",               "Pricing"),
-        ("news",     "google_news",     f"{company} strategy",              "News"),
-        ("position", "google_news",     f"{company} partnership expansion", "Position"),
+        ("hiring",   "google_jobs",     f"{company}",                          "Hiring"),
+        ("patents",  "google_scholar",  f"{company} patent filing",            "Patents"),
+        ("pricing",  "google_shopping", f"{company}",                          "Pricing"),
+        ("news",     "google_news",     f"{company}",                          "News"),
+        ("position", "google",          f"{company} partnership expansion",    "Position"),
     ]
 
     all_sources = []
@@ -220,6 +219,12 @@ def event_stream(company, description):
     for key, engine, query, label in signals:
         yield emit("signal_start", {"signal": key})
         items = serpapi_call(query, engine)
+
+        if not items:
+            print(f"[ORACLE] No results for {label} — skipping source cards")
+            yield emit("signal_complete", {"signal": key, "count": 0, "sources": []})
+            continue
+
         research_doc += f"=== {label.upper()} SIGNALS ===\n"
         research_doc += format_for_llm(items, source_counter)
         research_doc += "\n"
@@ -230,19 +235,23 @@ def event_stream(company, description):
             item_with_idx["category"] = label
             all_sources.append(item_with_idx)
         yield emit("signal_complete", {"signal": key, "count": len(items), "sources": items})
-        time.sleep(0.3)
+        time.sleep(0.5)
 
     yield emit("sources_collected", {"sources": all_sources})
 
-    # ==========================================================
-    # PATTERN ANALYSIS
-    # ==========================================================
+    # If NO sources found at all — clean error
+    if not all_sources:
+        yield emit("error", {"message": f"No intelligence found for {company}. Try a larger or more well-known company."})
+        yield emit("complete", {})
+        return
+
+    # ---- Pattern Analysis ----
     yield emit("pattern_start", {})
     pattern_prompt = (
         f"You are a competitive intelligence analyst. Analyze these signals about {company} "
         f"(which is: {description}).\n\n"
         f"Signals:\n{research_doc}\n\n"
-        f"Output EXACTLY this structure — no preamble, no closing summary:\n\n"
+        f"Output EXACTLY this structure — no preamble:\n\n"
         f"## Signal Strength Summary\n\n"
         f"| Category | Strength | Key Finding | Sources |\n"
         f"|----------|----------|-------------|---------|\n"
@@ -251,16 +260,16 @@ def event_stream(company, description):
         f"| Pricing | N/10 | one-line finding | [3] |\n"
         f"| News | N/10 | one-line finding | [4] |\n"
         f"| Position | N/10 | one-line finding | [5] |\n\n"
-        f"STRENGTH SCORING GUIDE (be consistent):\n"
-        f"- 8-10: Strong signal, clear strategic intent, active moves\n"
+        f"STRENGTH GUIDE:\n"
+        f"- 8-10: Strong signal, clear strategic intent\n"
         f"- 6-7: Moderate signal, meaningful activity\n"
         f"- 4-5: Weak signal, some activity\n"
-        f"- 1-3: No signal detected or minimal activity\n\n"
-        f"Replace N with the actual strength number (1-10).\n\n"
+        f"- 1-3: No signal detected\n\n"
+        f"If a category has NO data, mark it Strength: 1/10 with finding 'No data available'.\n\n"
         f"## Detailed Findings\n\n"
         f"### Hiring — Strength: N/10\n"
         f"- **What we found:** one plain-English sentence\n"
-        f"- **Why it matters:** one sentence on strategic intent\n"
+        f"- **Why it matters:** one sentence\n"
         f"- **Sources:** [1]\n\n"
         f"### Patents — Strength: N/10\n"
         f"- **What we found:** one sentence\n"
@@ -278,20 +287,12 @@ def event_stream(company, description):
         f"- **What we found:** one sentence\n"
         f"- **Why it matters:** one sentence\n"
         f"- **Sources:** [5]\n\n"
-        f"RULES:\n"
-        f"- Simple language, no jargon.\n"
-        f"- One sentence per bullet.\n"
-        f"- Cite sources ONLY with [N] markers.\n"
-        f"- No URLs in the text.\n"
-        f"- No preamble, no conclusion."
+        f"RULES: Simple language. One sentence per bullet. Cite with [N] only."
     )
     pattern = llm.invoke([HumanMessage(content=pattern_prompt)]).content
     yield emit("pattern_complete", {"pattern": pattern})
 
-    # ==========================================================
-    # EXTRACT STRENGTHS (from the summary table, precisely)
-    # ==========================================================
-    # Match rows like: | Hiring | 8/10 | ...
+    # Extract strengths
     strength_matches = re.findall(
         r'\|\s*(?:Hiring|Patents|Pricing|News|Position)\s*\|\s*\*{0,2}(\d+)\s*/\s*10',
         pattern
@@ -299,103 +300,72 @@ def event_stream(company, description):
     strengths = [int(s) for s in strength_matches if 1 <= int(s) <= 10]
     print(f"[ORACLE] Extracted strengths: {strengths}")
 
-    # Compute verdict upfront — this is the ground truth
     computed_decision, avg_strength = compute_verdict_from_strengths(strengths)
     print(f"[ORACLE] Computed verdict: {computed_decision} (avg {avg_strength:.1f})")
 
-    # ==========================================================
-    # THREAT ANALYSIS
-    # ==========================================================
+    # ---- Threat Analysis ----
     yield emit("threat_start", {})
     threat_prompt = (
         f"You are a Threat Analyst. Based on these signals about {company}, predict what they will do "
         f"in the next 90 days that could harm competitors.\n\n"
         f"Signals:\n{pattern}\n\n"
         f"Output EXACTLY this structure:\n\n"
-        f"**Prediction 1:** <one clear sentence describing the move>\n"
+        f"**Prediction 1:** <one clear sentence>\n"
         f"**Confidence:** XX% · **Sources:** [N]\n\n"
         f"**Prediction 2:** <one clear sentence>\n"
         f"**Confidence:** XX% · **Sources:** [N]\n\n"
         f"**Prediction 3:** <one clear sentence>\n"
         f"**Confidence:** XX% · **Sources:** [N]\n\n"
-        f"RULES:\n"
-        f"- Each prediction is ONE sentence.\n"
-        f"- Cite sources with [N] markers.\n"
-        f"- No preamble, no conclusion."
+        f"RULES: One sentence per prediction. Cite with [N]."
     )
     threat = creative_llm.invoke([HumanMessage(content=threat_prompt)]).content
     yield emit("threat_complete", {"threat": threat})
 
-    # ==========================================================
-    # OPPORTUNITY ANALYSIS
-    # ==========================================================
+    # ---- Opportunity Analysis ----
     yield emit("opportunity_start", {})
     opportunity_prompt = (
         f"You are an Opportunity Analyst. Based on these signals about {company}, identify where "
         f"competitors can gain advantage.\n\n"
         f"Signals:\n{pattern}\n\n"
         f"Output EXACTLY this structure:\n\n"
-        f"**The Opening:** <one sentence describing the strategic window>\n\n"
+        f"**The Opening:** <one sentence>\n\n"
         f"**Counter-Play 1:** <one sentence with sources [N]>\n\n"
         f"**Counter-Play 2:** <one sentence with sources [N]>\n\n"
         f"**Counter-Play 3:** <one sentence with sources [N]>\n\n"
-        f"RULES:\n"
-        f"- One sentence per item.\n"
-        f"- Cite sources with [N] markers.\n"
-        f"- No preamble, no conclusion."
+        f"RULES: One sentence per item. Cite with [N]."
     )
     opportunity = creative_llm.invoke([HumanMessage(content=opportunity_prompt)]).content
     yield emit("opportunity_complete", {"opportunity": opportunity})
 
-    # ==========================================================
-    # FINAL FORECAST (verdict is FIXED — not left to the AI)
-    # ==========================================================
+    # ---- Final Forecast ----
     yield emit("forecast_start", {})
-
-    # Build the verdict explanation
-    verdict_explanations = {
-        "ALERT": "The competitor is aggressively moving. Multiple strong signals detected. Competitors must respond within 7 days or risk losing market position.",
-        "MONITOR": "Signals are mixed. Some movement detected but not conclusive. Re-check in 30 days to see if the pattern strengthens.",
-        "OPPORTUNITY": "The competitor is weak. Low activity across most signals. This is a window to strike and gain market share.",
-        "STABLE": "The competitor is dormant. No meaningful activity detected. No action required — focus on your own roadmap."
-    }
-
     forecast_prompt = (
-        f"You are the Chief Strategy Officer. Based on this intelligence on {company}:\n\n"
-        f"THREAT ANALYSIS:\n{threat}\n\n"
-        f"OPPORTUNITY ANALYSIS:\n{opportunity}\n\n"
+        f"You are the Chief Strategy Officer. Intelligence on {company}:\n\n"
+        f"THREAT:\n{threat}\n\nOPPORTUNITY:\n{opportunity}\n\n"
         f"THE FINAL VERDICT IS: **{computed_decision}**\n"
-        f"(Based on average signal strength of {avg_strength:.1f}/10 across 5 categories)\n\n"
-        f"Explain WHY this verdict is correct given the signals. "
-        f"Then output EXACTLY this structure (no first-line verdict — that is already decided):\n\n"
+        f"(Based on average signal strength of {avg_strength:.1f}/10)\n\n"
+        f"Explain WHY this verdict is correct. Then output EXACTLY:\n\n"
         f"## 90-Day Prediction\n"
         f"- **Most likely move:** <one sentence with confidence %>\n"
         f"- **Secondary signal:** <one sentence with confidence %>\n"
         f"- **Wildcard:** <one sentence>\n\n"
         f"## Recommended Actions\n"
-        f"1. **<Short action title>** — one sentence\n"
-        f"2. **<Short action title>** — one sentence\n"
-        f"3. **<Short action title>** — one sentence\n\n"
+        f"1. **<Action title>** — one sentence\n"
+        f"2. **<Action title>** — one sentence\n"
+        f"3. **<Action title>** — one sentence\n\n"
         f"## Confidence Level\n"
-        f"**<LOW / MEDIUM / HIGH>** — one sentence explaining why\n\n"
-        f"RULES:\n"
-        f"- Short and punchy. No long paragraphs.\n"
-        f"- Match the tone to the verdict: "
-        f"if ALERT, urgency; if OPPORTUNITY, aggressive; if STABLE, calm; if MONITOR, watchful."
+        f"**<LOW/MEDIUM/HIGH>** — one sentence\n\n"
+        f"RULES: Short and punchy."
     )
     forecast = creative_llm.invoke([HumanMessage(content=forecast_prompt)]).content
 
-    # The verdict is code-controlled — never AI-generated
     decision = computed_decision
-
     print(f"[ORACLE] Final verdict: {decision}")
+
     yield emit("forecast_complete", {"forecast": forecast, "decision": decision, "avg_strength": round(avg_strength, 1)})
     yield emit("complete", {})
 
 
-# ==========================================================
-# ROUTES
-# ==========================================================
 @app.post("/api/analyze")
 async def analyze(request: AnalyzeRequest):
     return StreamingResponse(event_stream(request.company, request.description), media_type="text/event-stream")
@@ -403,4 +373,4 @@ async def analyze(request: AnalyzeRequest):
 
 @app.get("/")
 async def root():
-    return {"status": "Oracle API is running", "version": "6.0"}
+    return {"status": "Oracle API is running", "version": "7.0"}
